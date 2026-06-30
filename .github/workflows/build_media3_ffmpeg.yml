@@ -1,0 +1,166 @@
+name: Build APK with FFmpeg audio decoder
+
+# This workflow builds Media3's FFmpeg extension from source (it is not published on Maven
+# Central — it must be compiled with the NDK) and links it into the app, then builds the APK
+# against it. This is the variant you want if you're hitting MediaCodecAudioRenderer decode
+# failures (e.g. malformed/unusual AAC sample rates) and the platform decoder fallback alone
+# isn't enough. For a faster build without this extension, use build.yml instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      decoders:
+        description: 'Space-separated FFmpeg decoders to enable'
+        required: false
+        default: 'aac ac3 eac3 mp3 flac'
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - '**.gradle'
+      - 'app/**'
+      - '.github/workflows/build_media3_ffmpeg.yml'
+
+# Must match the media3-* version used in app/build.gradle, since the extension's internal
+# decoder/renderer interfaces are not stable across versions.
+env:
+  MEDIA3_VERSION: '1.2.1'
+  NDK_VERSION: '26.1.10909125'
+  # Restrict to the ABIs you actually ship to keep the native build fast. Add 'x86,x86_64'
+  # back in if you need emulator/Chromebook support.
+  ANDROID_ABIS: 'armeabi-v7a,arm64-v8a'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout app repo
+        uses: actions/checkout@v4
+        with:
+          path: PersonalTV
+
+      # Checked out as a SIBLING directory to PersonalTV, matching the relative path
+      # ("../media3-ffmpeg-src") that settings.gradle looks for.
+      - name: Checkout androidx/media (media3) at matching version tag
+        uses: actions/checkout@v4
+        with:
+          repository: androidx/media
+          ref: ${{ env.MEDIA3_VERSION }}
+          path: media3-ffmpeg-src
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+          cache-dependency-path: PersonalTV/**/*.gradle*
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: sdkmanager --install "ndk;${NDK_VERSION}"
+        env:
+          NDK_VERSION: ${{ env.NDK_VERSION }}
+
+      - name: Compute cache-safe ABI key fragment
+        id: abi_key
+        run: echo "value=$(echo "${ANDROID_ABIS}" | tr ',' '-')" >> "$GITHUB_OUTPUT"
+        env:
+          ANDROID_ABIS: ${{ env.ANDROID_ABIS }}
+
+      - name: Locate build_ffmpeg.sh
+        id: locate
+        run: |
+          set -e
+          SCRIPT_PATH=$(find media3-ffmpeg-src -iname "build_ffmpeg.sh" | head -n 1)
+          if [ -z "$SCRIPT_PATH" ]; then
+            echo "::error::build_ffmpeg.sh not found anywhere in the media3-ffmpeg-src checkout."
+            echo "Listing repo structure around 'ffmpeg' to help diagnose:"
+            find media3-ffmpeg-src -iname "*ffmpeg*" -maxdepth 6
+            exit 1
+          fi
+          echo "Found: ${SCRIPT_PATH}"
+          echo "script_path=${SCRIPT_PATH}" >> "$GITHUB_OUTPUT"
+          echo "script_dir=$(dirname "${SCRIPT_PATH}")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache FFmpeg source + build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ steps.locate.outputs.script_dir }}/jni/ffmpeg
+            ${{ steps.locate.outputs.script_dir }}/libs
+          # Bump the suffix manually if you ever change ANDROID_ABIS or the decoders list,
+          # since the cache key doesn't encode the workflow_dispatch input automatically.
+          key: ffmpeg-build-${{ env.MEDIA3_VERSION }}-${{ steps.abi_key.outputs.value }}-v1
+
+      - name: Build FFmpeg native libraries
+        working-directory: ${{ steps.locate.outputs.script_dir }}
+        run: |
+          set -e
+          chmod +x build_ffmpeg.sh
+          NDK_PATH="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          DECODERS="${{ github.event.inputs.decoders || 'aac ac3 eac3 mp3 flac' }}"
+
+          # build_ffmpeg.sh's exact argument order has shifted between media3 releases —
+          # if this step fails, run it with no args first (e.g. `./build_ffmpeg.sh` alone)
+          # in a debug step to print its usage text, since some versions take fewer args
+          # or read EXT_PATH from being invoked in-place rather than as an explicit arg.
+          ./build_ffmpeg.sh \
+            "$(pwd)" \
+            "${NDK_PATH}" \
+            "linux-x86_64" \
+            "${ANDROID_ABIS}" \
+            ${DECODERS}
+        env:
+          NDK_VERSION: ${{ env.NDK_VERSION }}
+          ANDROID_ABIS: ${{ env.ANDROID_ABIS }}
+
+      - name: Align module path with settings.gradle expectation
+        run: |
+          set -e
+          EXPECTED="media3-ffmpeg-src/libraries/decoder_ffmpeg"
+          # script_dir is typically .../decoder_ffmpeg/src/main — walk up to the directory
+          # that actually contains this module's own build.gradle (the real module root),
+          # which is the thing settings.gradle needs to point at, regardless of how deep
+          # build_ffmpeg.sh itself lives.
+          MODULE_ROOT=$(dirname "${{ steps.locate.outputs.script_dir }}")
+          while [ "$MODULE_ROOT" != "/" ] && [ ! -f "$MODULE_ROOT/build.gradle" ]; do
+            MODULE_ROOT=$(dirname "$MODULE_ROOT")
+          done
+          if [ ! -f "$MODULE_ROOT/build.gradle" ]; then
+            echo "::error::Could not find the ffmpeg decoder module's build.gradle by walking up from ${{ steps.locate.outputs.script_dir }}"
+            exit 1
+          fi
+          echo "Resolved module root: $MODULE_ROOT"
+          if [ "$(realpath "$MODULE_ROOT")" != "$(realpath -m "$EXPECTED")" ]; then
+            mkdir -p "$(dirname "$EXPECTED")"
+            ln -s "$(realpath "$MODULE_ROOT")" "$EXPECTED"
+            echo "Symlinked $EXPECTED -> $MODULE_ROOT"
+          fi
+
+      - name: Grant execute permission for gradlew
+        working-directory: PersonalTV
+        run: chmod +x gradlew
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-ffmpeg-${{ hashFiles('PersonalTV/**/*.gradle*', 'PersonalTV/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-ffmpeg-
+
+      - name: Build debug APK (with FFmpeg decoder)
+        working-directory: PersonalTV
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PersonalTV-debug-ffmpeg-${{ github.run_number }}
+          path: PersonalTV/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30

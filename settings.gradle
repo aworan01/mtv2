@@ -1,0 +1,30 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.name = "PersonalTV"
+include ':app'
+
+// Media3's FFmpeg audio decoder extension is not published on Maven Central — it must be
+// built from source against the NDK. The build_media3_ffmpeg.yml workflow checks out the
+// androidx/media repo to ../media3-ffmpeg-src (sibling of this project root) and runs its
+// native build script before Gradle runs, so this module resolves only in that CI context.
+// Locally, this block is skipped automatically if that directory doesn't exist, and the app
+// just falls back to the platform AAC decoder (with decoder-fallback handling already in
+// PlayerViewModel) instead of failing the Gradle sync.
+def ffmpegExtDir = new File(rootDir, "../media3-ffmpeg-src/libraries/decoder_ffmpeg")
+if (ffmpegExtDir.exists()) {
+    include ':decoder-ffmpeg'
+    project(':decoder-ffmpeg').projectDir = ffmpegExtDir
+}

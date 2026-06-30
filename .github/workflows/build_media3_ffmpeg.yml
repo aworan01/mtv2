@@ -95,6 +95,24 @@ jobs:
           # since the cache key doesn't encode the workflow_dispatch input automatically.
           key: ffmpeg-build-${{ env.MEDIA3_VERSION }}-${{ steps.abi_key.outputs.value }}-v1
 
+      - name: Clone FFmpeg source
+        # build_ffmpeg.sh does NOT fetch FFmpeg source itself in this media3 version — it
+        # expects an actual FFmpeg checkout to already exist at <module>/jni/ffmpeg before
+        # it runs (that's the directory it just failed to cd into). This is a shallow clone
+        # of an FFmpeg release branch to keep it fast; release/6.0 is a safe, well-tested
+        # pairing with media3 1.2.1's decoder_ffmpeg JNI glue code. Falls back to the GitHub
+        # mirror if the primary FFmpeg git server is slow/unreachable from the runner.
+        working-directory: ${{ steps.locate.outputs.script_dir }}
+        run: |
+          set -e
+          mkdir -p jni
+          if [ ! -d jni/ffmpeg/.git ]; then
+            git clone --depth 1 --branch release/6.0 https://git.ffmpeg.org/ffmpeg.git jni/ffmpeg \
+              || git clone --depth 1 --branch release/6.0 https://github.com/FFmpeg/FFmpeg.git jni/ffmpeg
+          else
+            echo "FFmpeg source already present (cache hit), skipping clone."
+          fi
+
       - name: Build FFmpeg native libraries
         working-directory: ${{ steps.locate.outputs.script_dir }}
         run: |

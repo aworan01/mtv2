@@ -103,25 +103,21 @@ jobs:
           NDK_PATH="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
           DECODERS="${{ github.event.inputs.decoders || 'aac ac3 eac3 mp3 flac' }}"
 
-          # build_ffmpeg.sh takes ONE ABI per invocation (it concatenates ANDROID_ABI
-          # straight into the toolchain binary name internally) — passing a comma-separated
-          # list breaks it. Loop over each ABI and invoke it separately; the script accumulates
-          # output into per-ABI subdirectories under libs/, so repeated runs don't clobber
-          # each other.
-          IFS=',' read -ra ABI_LIST <<< "${ANDROID_ABIS}"
-          for ABI in "${ABI_LIST[@]}"; do
-            echo "::group::Building FFmpeg for ${ABI}"
-            ./build_ffmpeg.sh \
-              "$(pwd)" \
-              "${NDK_PATH}" \
-              "linux-x86_64" \
-              "${ABI}" \
-              ${DECODERS}
-            echo "::endgroup::"
-          done
+          # The script's 4th positional arg is labeled "ANDROID_ABI" in its own log output,
+          # but it's actually an Android API LEVEL NUMBER (e.g. 21) — it gets concatenated
+          # straight into the clang toolchain binary name (armv7a-linux-androideabi21-clang),
+          # and its own error message ("must not be greater than your application's minSdk")
+          # only makes sense as an API level. It builds all standard ABIs in one pass, so this
+          # is a single invocation, not a per-ABI loop. Using PersonalTV's minSdk (21) here.
+          ./build_ffmpeg.sh \
+            "$(pwd)" \
+            "${NDK_PATH}" \
+            "linux-x86_64" \
+            "${ANDROID_MIN_SDK}" \
+            ${DECODERS}
         env:
           NDK_VERSION: ${{ env.NDK_VERSION }}
-          ANDROID_ABIS: ${{ env.ANDROID_ABIS }}
+          ANDROID_MIN_SDK: '21'
 
       - name: Align module path with settings.gradle expectation
         run: |
